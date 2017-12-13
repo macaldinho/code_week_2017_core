@@ -1,218 +1,153 @@
 ﻿using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Reactive.Linq;
+using System.Linq;
+using System.Net.Http.Headers;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.SignalR;
+using SignalR.StockTick.Constants;
+using SignalR.StockTick.Hubs;
+using SignalR.StockTick.Models;
 
 namespace SignalR.StockTick
 {
     public class StockTicker
     {
-         readonly SemaphoreSlim _marketStateLock = new SemaphoreSlim(1, 1);
-         readonly SemaphoreSlim _updateStockPricesLock = new SemaphoreSlim(1, 1);
-
-         readonly ConcurrentDictionary<string, Stock> _stocks = new ConcurrentDictionary<string, Stock>();
-
-        // Stock can go up or down by a percentage of this factor on each change
-         readonly double _rangePercent = 0.002;
-
-         readonly TimeSpan _updateInterval = TimeSpan.FromMilliseconds(250);
-         readonly Random _updateOrNotRandom = new Random();
-
-         Timer _timer;
-         volatile bool _updatingStockPrices;
-         volatile MarketState _marketState;
+        readonly SemaphoreSlim _updateStockPricesStreamLock = new SemaphoreSlim(1, 1);
+        readonly ICollection<Stock> _stocks;
+        readonly TimeSpan _updateInterval = TimeSpan.FromMilliseconds(60000);
+        readonly Timer _timer;
+        volatile bool _updatingStockPrices;
+        volatile bool _stocksLoaded;
+        DateTime _lastCloseTime;
 
         public StockTicker(IHubContext<StockTickerHub> clients)
         {
             Clients = clients;
-            LoadDefaultStocks();
+
+            _stocks = new List<Stock>
+            {
+                new Stock { Symbol = "MSFT", DisplayName = "Microsoft"},
+                new Stock { Symbol = "AAPL", DisplayName = "Apple"},
+                new Stock { Symbol = "GOOG", DisplayName ="Google"},
+                new Stock { Symbol = "AMZN", DisplayName = "Amazon"},
+                new Stock { Symbol = "BAC", DisplayName = "Bank of America"},
+                new Stock { Symbol = "IBM", DisplayName = "IBM"},
+                new Stock { Symbol = "TSLA", DisplayName = "Tesla"},
+                new Stock { Symbol = "AXP",DisplayName = "American Express"},
+                new Stock { Symbol = "GE", DisplayName = "General Electric"}
+            };
+
+            _timer = new Timer(UpdateStockPrices, null, _updateInterval, _updateInterval);
+
+            Task.Factory.StartNew(() =>
+            {
+                UpdateStockPrices(null);
+            });
         }
 
-         IHubContext<StockTickerHub> Clients
+        IHubContext<StockTickerHub> Clients
         {
             get;
-            set;
-        }
-
-        public MarketState MarketState
-        {
-            get { return _marketState; }
-             set { _marketState = value; }
         }
 
         public IEnumerable<Stock> GetAllStocks()
         {
-            return _stocks.Values;
+            return _stocksLoaded ? _stocks : null;
         }
 
-        public IObservable<Stock> StreamStocks()
+        async void UpdateStockPrices(object state)
         {
-            return Observable.Create(
-                async (IObserver<Stock> observer) =>
-                {
-                    while (MarketState == MarketState.Open)
-                    {
-                        foreach (var stock in _stocks.Values)
-                        {
-                            observer.OnNext(stock);
-                        }
-                        await Task.Delay(_updateInterval);
-                    }
-                });
-        }
+            DateTime estTime = GetEstTime();
 
-        public async Task OpenMarket()
-        {
-            await _marketStateLock.WaitAsync();
-            try
+            var minutes = (estTime - _lastCloseTime).TotalMinutes;
+
+            if (minutes > 0 && _stocksLoaded)
             {
-                if (MarketState != MarketState.Open)
-                {
-                    _timer = new Timer(UpdateStockPrices, null, _updateInterval, _updateInterval);
-
-                    MarketState = MarketState.Open;
-
-                    await BroadcastMarketStateChange(MarketState.Open);
-                }
+                await BroadcastStocks(_stocks);
             }
-            finally
+            else
             {
-                _marketStateLock.Release();
+                await StreamStocks();
             }
         }
 
-        public async Task CloseMarket()
+        async Task StreamStocks()
         {
-            await _marketStateLock.WaitAsync();
-            try
-            {
-                if (MarketState == MarketState.Open)
-                {
-                    if (_timer != null)
-                    {
-                        _timer.Dispose();
-                    }
+            await _updateStockPricesStreamLock.WaitAsync();
 
-                    MarketState = MarketState.Closed;
-
-                    await BroadcastMarketStateChange(MarketState.Closed);
-                }
-            }
-            finally
-            {
-                _marketStateLock.Release();
-            }
-        }
-
-        public async Task Reset()
-        {
-            await _marketStateLock.WaitAsync();
-            try
-            {
-                if (MarketState != MarketState.Closed)
-                {
-                    throw new InvalidOperationException("Market must be closed before it can be reset.");
-                }
-
-                LoadDefaultStocks();
-                await BroadcastMarketReset();
-            }
-            finally
-            {
-                _marketStateLock.Release();
-            }
-        }
-
-         void LoadDefaultStocks()
-        {
-            _stocks.Clear();
-
-            var stocks = new List<Stock>
-            {
-                new Stock { Symbol = "MSFT", Price = 75.12m },
-                new Stock { Symbol = "AAPL", Price = 158.44m },
-                new Stock { Symbol = "GOOG", Price = 924.54m }
-            };
-
-            stocks.ForEach(stock => _stocks.TryAdd(stock.Symbol, stock));
-        }
-
-         async void UpdateStockPrices(object state)
-        {
-            // This function must be re-entrant as it's running as a timer interval handler
-            await _updateStockPricesLock.WaitAsync();
             try
             {
                 if (!_updatingStockPrices)
                 {
                     _updatingStockPrices = true;
-
-                    foreach (var stock in _stocks.Values)
+                    //var timer = new Stopwatch();
+                    //timer.Start();
+                    foreach (var stock in _stocks)
                     {
-                        TryUpdateStockPrice(stock);
-                    }
+                        using (var client = new System.Net.Http.HttpClient { BaseAddress = new Uri(HttpConstants.BaseUri) })
+                        {
+                            client.DefaultRequestHeaders.Accept.Clear();
+                            client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue(HttpConstants.JsonHeader));
 
+                            var response = await client.GetAsync(string.Format(HttpConstants.Request, stock.Symbol));
+
+                            if (response.IsSuccessStatusCode)
+                            {
+                                var cvsResult = await response.Content.ReadAsStringAsync();
+
+                                if (cvsResult.StartsWith("timestamp"))
+                                {
+                                    var lines = cvsResult.Replace("\r", "").Split('\n').Select(l => l.Split(',')).Where(x => x.Length > 1).ToList();
+
+                                    stock.TimeSeries.Clear();
+
+                                    foreach (var line in lines.Skip(1))
+                                    {
+                                        stock.TimeSeries.Add(new TimeSerie
+                                        {
+                                            TimeStamp = DateTime.Parse(line[0]),
+                                            Open = decimal.Parse(line[1]),
+                                            High = decimal.Parse(line[2]),
+                                            Low = decimal.Parse(line[3]),
+                                            Close = decimal.Parse(line[4]),
+                                            Volume = decimal.Parse(line[5])
+                                        });
+
+                                    }
+
+                                    _lastCloseTime = _stocks.First().TimeSeries.First().TimeStamp;
+                                }
+                            }
+                        }
+                    }
+                    //timer.Stop();
                     _updatingStockPrices = false;
                 }
             }
+            catch (Exception)
+            {
+            }
             finally
             {
-                _updateStockPricesLock.Release();
+                _stocksLoaded = true;
+                _updateStockPricesStreamLock.Release();
+                await BroadcastStocks(_stocks);
             }
         }
 
-         bool TryUpdateStockPrice(Stock stock)
+        async Task BroadcastStocks(IEnumerable<Stock> stocks)
         {
-            // Randomly choose whether to udpate this stock or not
-            var r = _updateOrNotRandom.NextDouble();
-            if (r > 0.1)
-            {
-                return false;
-            }
-
-            // Update the stock price by a random factor of the range percent
-            var random = new Random((int)Math.Floor(stock.Price));
-            var percentChange = random.NextDouble() * _rangePercent;
-            var pos = random.NextDouble() > 0.51;
-            var change = Math.Round(stock.Price * (decimal)percentChange, 2);
-            change = pos ? change : -change;
-
-            stock.Price += change;
-            return true;
+            await Clients.Clients.All.InvokeAsync("broadStocks", stocks);
         }
 
-         async Task BroadcastMarketStateChange(MarketState marketState)
+        DateTime GetEstTime()
         {
-            switch (marketState)
-            {
-                case MarketState.Open:
-                    await Clients.Clients.All.InvokeAsync("marketOpened");
-                    break;
-                case MarketState.Closed:
-                    await Clients.Clients.All.InvokeAsync("marketClosed");
-                    break;
-                default:
-                    break;
-            }
-        }
+            var timeUtc = DateTime.UtcNow;
+            var easternZone = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+            var easternTime = TimeZoneInfo.ConvertTimeFromUtc(timeUtc, easternZone);
 
-         async Task BroadcastMarketReset()
-        {
-            await Clients.Clients.All.InvokeAsync("marketReset");
+            return easternTime;
         }
-
-         async Task BroadcastStockPrice(Stock stock)
-        {
-            await Clients.Clients.All.InvokeAsync("updateStockPrice", stock);
-        }
-    }
-
-    public enum MarketState
-    {
-        Closed,
-        Open
     }
 }

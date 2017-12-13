@@ -1,13 +1,12 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Threading.Tasks;
+﻿using System.Collections.Generic;
 using Microsoft.AspNetCore.SignalR;
+using SignalR.StockTick.Models;
 
-namespace SignalR.StockTick
+namespace SignalR.StockTick.Hubs
 {
     public class StockTickerHub : Hub
     {
-        private readonly StockTicker _stockTicker;
+        readonly StockTicker _stockTicker;
 
         public StockTickerHub(StockTicker stockTicker)
         {
@@ -17,31 +16,6 @@ namespace SignalR.StockTick
         public IEnumerable<Stock> GetAllStocks()
         {
             return _stockTicker.GetAllStocks();
-        }
-
-        public IObservable<Stock> StreamStocks()
-        {
-            return _stockTicker.StreamStocks();
-        }
-
-        public string GetMarketState()
-        {
-            return _stockTicker.MarketState.ToString();
-        }
-
-        public async Task OpenMarket()
-        {
-            await _stockTicker.OpenMarket();
-        }
-
-        public async Task CloseMarket()
-        {
-            await _stockTicker.CloseMarket();
-        }
-
-        public async Task Reset()
-        {
-            await _stockTicker.Reset();
         }
     }
 }
