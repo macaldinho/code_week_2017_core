@@ -12,7 +12,21 @@ namespace SignalR.StockTick.Models
 
         public string Symbol { get; set; }
         public string DisplayName { get; set; }
-        public ICollection<TimeSerie> TimeSeries { get; set; }
+        public IList<TimeSerie> TimeSeries { get; set; }
+        public string Status
+        {
+            get
+            {
+                if (TimeSeries.Count <= 0) return PriceStatus.None.ToString();
+
+                if (TimeSeries[0].Close > TimeSeries[1].Close)
+                {
+                    return PriceStatus.Up.ToString();
+                }
+
+                return TimeSeries[0].Close < TimeSeries[1].Close ? PriceStatus.Down.ToString() : PriceStatus.Equal.ToString();
+            }
+        }
     }
 
     public class TimeSerie

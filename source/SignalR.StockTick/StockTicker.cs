@@ -40,7 +40,7 @@ namespace SignalR.StockTick
         {
             _stockNames = new Dictionary<string, string>
             {
-                {"MSFTS",  "Microsoft"},
+                {"MSFT",  "Microsoft"},
                 {"AAPL",  "Apple"},
                 {"GOOG", "Google"},
                 {"AMZN",  "Amazon"},
@@ -126,7 +126,6 @@ namespace SignalR.StockTick
                                                 Close = decimal.Parse(line[4]),
                                                 Volume = decimal.Parse(line[5])
                                             });
-
                                         }
                                         _stocks.TryUpdate(stockName.Key, stock, _stocks[stockName.Key]);
                                     }
